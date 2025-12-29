@@ -1,4 +1,4 @@
-# helloworld
+# Anitabi圣地巡礼查询插件
 
 AstrBot 插件模板
 
