@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw, ImageFont
 import io
 
 from astrbot.api.star import Star, register, Context
-from astrbot.api.event import AstrMessageEvent
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api import logger
 import aiohttp
 
@@ -80,8 +80,7 @@ class SacredJourneyPlugin(Star):
                 "圣地巡礼插件帮助：\n"
                 "• /圣地巡礼 随机作品\n"
                 "• /圣地巡礼 随机地点\n"
-                "• (不可用)/圣地巡礼 搜寻\n"
-                "• (不可用)/圣地巡礼 <作品ID>"
+                "• /圣地巡礼 猜地点"
             )
             yield event.plain_result(help_text)
             return
@@ -93,14 +92,11 @@ class SacredJourneyPlugin(Star):
         elif arg == "随机地点":
             async for msg in self.random_point(event):
                 yield msg
-        elif arg == "搜寻":
-            async for msg in self.search_work(event):
-                yield msg
-        elif arg.isdigit():
-            async for msg in self.query_by_id(event, arg):
+        elif arg == "猜地点":
+            async for msg in self.guess_location(event):
                 yield msg
         else:
-            yield event.plain_result("无效参数。请输入：随机作品 / 随机地点 / 搜寻 / <作品ID>")
+            yield event.plain_result("无效参数。请输入：随机作品 / 随机地点 / 猜地点")
 
     async def random_work(self, event: AstrMessageEvent):
         try:
@@ -111,31 +107,6 @@ class SacredJourneyPlugin(Star):
         except Exception as e:
             logger.error(f"随机作品出错: {e}")
             yield event.plain_result("获取随机作品失败，请稍后再试。")
-
-    async def query_by_id(self, event: AstrMessageEvent, subject_id: str):
-        try:
-            url = LITE_API.format(subject_id)
-            async with self.session.get(url) as resp:
-                if resp.status == 404:
-                    yield event.plain_result("未找到该作品ID。")
-                    return
-                resp.raise_for_status()
-                data = await resp.json()
-            points = data.get('litePoints', [])
-            if not points:
-                yield event.plain_result("该作品暂无圣地信息。")
-                return
-            img_bytes = await self._generate_image_grid(points)
-            yield event.image_result(img_bytes)
-            self.waiting_for_input[event.get_sender_id()] = {
-                'type': 'select_point',
-                'data': {'points': points},
-                'timeout': time.time() + 30
-            }
-            yield event.plain_result("请继续输入地点ID或者数字序号查询地点详情（30秒内有效）")
-        except Exception as e:
-            logger.error(f"查询作品 {subject_id} 出错: {e}")
-            yield event.plain_result("查询失败，请检查ID是否正确。")
 
     async def random_point(self, event: AstrMessageEvent):
         bangumi_list = self.load_bangumi_list()
@@ -159,6 +130,9 @@ class SacredJourneyPlugin(Star):
                             
                             # 返回地点图片
                             if image_url:
+                                # 尝试在 URL 后面添加 ?plan=h360
+                                if '?' not in image_url:
+                                    image_url = image_url + '?plan=h360'
                                 yield event.image_result(image_url)
                             else:
                                 yield event.plain_result("该地点暂无图片")
@@ -181,13 +155,124 @@ class SacredJourneyPlugin(Star):
                 continue
         yield event.plain_result("未能找到有效的随机地点，请稍后再试。")
 
-    async def search_work(self, event: AstrMessageEvent):
-        yield event.plain_result("请输入要搜寻的作品名称：")
-        self.waiting_for_input[event.get_sender_id()] = {
-            'type': 'search_keyword',
-            'timeout': time.time() + 30
-        }
+    async def guess_location(self, event: AstrMessageEvent):
+        """猜地点游戏：显示图片，让用户从三个选项中猜出正确答案"""
+        bangumi_list = self.load_bangumi_list()
+        for _ in range(10):
+            item = random.choice(bangumi_list)
+            sid = item.get('id')
+            if not sid:
+                continue
+            try:
+                async with self.session.get(LITE_API.format(sid), timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        points = data.get('litePoints', [])
+                        if points:
+                            # 随机选择一个正确答案
+                            correct_point = random.choice(points)
+                            correct_geo = correct_point.get('geo', [])
+                            correct_name = f"{correct_point.get('cn', '')}（{correct_point.get('name', '')}）"
 
+                            # 获取两个不同的干扰项
+                            distractors = []
+                            temp_bangumi = [b for b in bangumi_list if b.get('id') != sid]
+                            random.shuffle(temp_bangumi)
+
+                            for other_item in temp_bangumi:
+                                if len(distractors) >= 2:
+                                    break
+                                try:
+                                    other_sid = other_item.get('id')
+                                    async with self.session.get(LITE_API.format(other_sid), timeout=aiohttp.ClientTimeout(total=5)) as other_resp:
+                                        if other_resp.status == 200:
+                                            other_data = await other_resp.json()
+                                            other_points = other_data.get('litePoints', [])
+                                            if other_points:
+                                                other_point = random.choice(other_points)
+                                                other_name = f"{other_point.get('cn', '')}（{other_point.get('name', '')}）"
+                                                distractors.append((other_name, other_item))
+                                except:
+                                    continue
+
+                            if len(distractors) < 2:
+                                continue
+
+                            # 创建选项列表
+                            options = [
+                                (correct_name, item),
+                                (distractors[0][0], distractors[0][1]),
+                                (distractors[1][0], distractors[1][1])
+                            ]
+
+                            # 随机打乱选项，记住正确答案的位置
+                            random.shuffle(options)
+                            correct_index = options.index((correct_name, item)) + 1
+
+                            # 显示图片
+                            image_url = correct_point.get('image')
+                            if image_url:
+                                # 尝试在 URL 后面添加 ?plan=h360
+                                if '?' not in image_url:
+                                    image_url = image_url + '?plan=h360'
+                                yield event.image_result(image_url)
+                            else:
+                                yield event.plain_result("该地点暂无图片")
+
+                            # 显示选项
+                            options_text = "🎮 猜猜这是哪里？（输入 1/2/3）\n"
+                            for i, (name, _) in enumerate(options):
+                                options_text += f"{i + 1}. {name}\n"
+
+                            yield event.plain_result(options_text.strip())
+
+                            # 设置等待用户输入
+                            self.waiting_for_input[event.get_sender_id()] = {
+                                'type': 'guess_location',
+                                'attempts': 0,
+                                'correct_index': correct_index,
+                                'point': correct_point,
+                                'item': item,
+                                'timeout': time.time() + 60  # 60秒超时
+                            }
+                            return
+            except Exception as e:
+                logger.info(f"猜地点尝试失败 (作品ID: {sid}): {e}")
+                continue
+        yield event.plain_result("未能找到有效的地点，请稍后再试。")
+
+    async def _send_location_result(self, event: AstrMessageEvent, point, item):
+        """发送地点详情结果（参考随机地点的结构）"""
+        geo = point.get('geo', [])
+        geo_str = f"({geo[0]}, {geo[1]})" if geo else "(无坐标)"
+        name = f"{point.get('cn', '')}（{point.get('name', '')}）"
+        pid = point['id']
+        sid = item['id']
+
+        # 返回地点图片
+        image_url = point.get('image')
+        if image_url:
+            # 尝试在 URL 后面添加 ?plan=h360
+            if '?' not in image_url:
+                image_url = image_url + '?plan=h360'
+            yield event.image_result(image_url)
+        else:
+            yield event.plain_result("该地点暂无图片")
+
+        # 构造链接
+        location_link = f"https://www.anitabi.cn/map?bangumiId={sid}&pid={pid}"
+        work_link = f"https://www.anitabi.cn/map?bangumiId={sid}"
+
+        # 返回地点信息
+        location_info = f"\n{name}\n地图: {location_link}"
+
+        # 返回作品信息
+        title = item.get('cn') or item.get('title', '未知')
+        work_info = f"\n所属作品：{title} (ID: {sid})\n作品直链: {work_link}"
+
+        yield event.plain_result(location_info + work_info)
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
         if user_id not in self.waiting_for_input:
@@ -201,50 +286,35 @@ class SacredJourneyPlugin(Star):
 
         msg = event.message_str.strip()
         try:
-            if wait_info['type'] == 'select_work':
-                idx = int(msg) - 1
-                candidates = wait_info['data']
-                if 0 <= idx < len(candidates):
-                    async for msg in self._send_work_detail(event, candidates[idx]):
-                        yield msg
-                    del self.waiting_for_input[user_id]
+            if wait_info['type'] == 'guess_location':
+                attempts = wait_info['attempts']
+                correct_index = wait_info['correct_index']
+                point = wait_info['point']
+                item = wait_info['item']
+
+                if msg not in ['1', '2', '3']:
+                    yield event.plain_result("请输入 1、2 或 3 来选择答案！")
                     return
-                else:
-                    yield event.plain_result("序号超出范围！")
-            elif wait_info['type'] == 'select_point':
-                points = wait_info['data']['points']
-                point_map = {}
-                for i, p in enumerate(points):
-                    point_map[str(i + 1)] = p
-                    point_map[p['id']] = p
-                if msg in point_map:
-                    point = point_map[msg]
-                    geo = point.get('geo', [])
-                    geo_str = f"({geo[0]}, {geo[1]})" if geo else "(无坐标)"
-                    name = f"{point.get('cn', '')}（{point.get('name', '')}）"
-                    yield event.image_result(point.get('image'))
-                    yield event.plain_result(f"\n{name}\n经纬度: {geo_str}")
+
+                guess = int(msg)
+                attempts += 1
+
+                if guess == correct_index:
+                    # 答对了
                     del self.waiting_for_input[user_id]
-                    return
+                    yield event.plain_result("🎉 恭喜你答对了！")
+                    async for result in self._send_location_result(event, point, item):
+                        yield result
+                elif attempts >= 3:
+                    # 三次都答错了
+                    del self.waiting_for_input[user_id]
+                    yield event.plain_result(f"很遗憾，三次机会用完了。正确答案是 {correct_index}。")
+                    async for result in self._send_location_result(event, point, item):
+                        yield result
                 else:
-                    yield event.plain_result("请输入正确的地点 ID 或序号！")
-            elif wait_info['type'] == 'search_keyword':
-                keyword = msg
-                bangumi_list = self.load_bangumi_list()
-                matches = [item for item in bangumi_list
-                          if keyword.lower() in (item.get('title', '') + item.get('cn', '')).lower()]
-                if not matches:
-                    yield event.plain_result("未找到相关作品。")
-                else:
-                    img_bytes = await self._generate_cover_grid(matches[:20])
-                    yield event.image_result(img_bytes)
-                    self.waiting_for_input[user_id] = {
-                        'type': 'select_work',
-                        'data': matches[:20],
-                        'timeout': time.time() + 30
-                    }
-                    yield event.plain_result("请继续输入序号查询作品详情（30秒内有效）")
-                del self.waiting_for_input[user_id]
+                    # 继续尝试
+                    self.waiting_for_input[user_id]['attempts'] = attempts
+                    yield event.plain_result(f"答错了！还剩 {3 - attempts} 次机会，请继续猜：")
         except Exception as e:
             logger.error(f"处理用户输入时出错: {e}")
             yield event.plain_result("输入处理出错，请重试。")
