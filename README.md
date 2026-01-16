@@ -11,11 +11,13 @@
 ## 安装方法
 
 1. 将插件克隆到 AstrBot 的 `plugins` 目录：
+
 ```bash
 git clone https://github.com/enldm/astrbot_plugin_anitabi.git
 ```
 
 2. 确保 AstrBot 已安装以下依赖：
+
 ```
 aiohttp
 Pillow
@@ -55,3 +57,7 @@ enldm
 
 - [AstrBot 官方文档](https://astrbot.app)
 - [Anitabi 官网](https://www.anitabi.cn)
+
+## 已知问题
+
+首次获取 json 时可能需要的时间较长，可手动访问https://api.anitabi.cn/bangumi 将 json 保存到 data\plugin_data\astrbot_plugin_anitabi。

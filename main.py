@@ -1,21 +1,22 @@
-from astrbot.api.all import *
 import os
 import json
 import time
 import random
 import asyncio
-from PIL import Image, ImageDraw, ImageFont
-import io
+from pathlib import Path
 
-from astrbot.api.star import Star, register, Context
+from astrbot.api.star import Star, register, Context, StarTools
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api import logger
 import aiohttp
 
-CACHE_FILE = "anitabi.json"
+# 常量定义
 CACHE_EXPIRE_HOURS = 24
 API_BASE = "https://api.anitabi.cn/bangumi"
 LITE_API = f"{API_BASE}/{{}}/lite"
+SESSION_TIMEOUT = 30
+REQUEST_TIMEOUT = 10
+CACHE_FETCH_TIMEOUT = 120  # 首次下载缓存文件的超时时间（秒）
 
 
 @register("圣地巡礼", "enldm", "圣地巡礼查询插件", "1.0.0")
@@ -23,33 +24,26 @@ class SacredJourneyPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         self.session = None
-        self.font = self._load_font()
         self.waiting_for_input = {}
+        self.cache_dir = StarTools.get_data_dir("astrbot_plugin_anitabi")
+        self.cache_file = self.cache_dir / "anitabi.json"
+        self.loop = asyncio.get_event_loop()
 
     async def initialize(self):
-        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=SESSION_TIMEOUT))
         await self.ensure_cache()
 
     async def shutdown(self):
         if self.session:
             await self.session.close()
 
-    def _load_font(self):
-        try:
-            if os.name == 'nt':
-                return ImageFont.truetype("msyh.ttc", 16)
-            else:
-                return ImageFont.load_default()
-        except:
-            return ImageFont.load_default()
-
     async def ensure_cache(self):
         need_fetch = False
-        if not os.path.exists(CACHE_FILE):
+        if not self.cache_file.exists():
             logger.info("anitabi.json 不存在，开始首次下载。")
             need_fetch = True
         else:
-            mod_time = os.path.getmtime(CACHE_FILE)
+            mod_time = await self.loop.run_in_executor(None, os.path.getmtime, str(self.cache_file))
             if time.time() - mod_time > CACHE_EXPIRE_HOURS * 3600:
                 logger.info("anitabi.json 已过期，重新下载。")
                 need_fetch = True
@@ -57,23 +51,31 @@ class SacredJourneyPlugin(Star):
         if need_fetch:
             try:
                 logger.info(f"正在异步请求 {API_BASE} ...")
-                async with self.session.get(API_BASE) as resp:
+                async with self.session.get(API_BASE, timeout=aiohttp.ClientTimeout(total=CACHE_FETCH_TIMEOUT)) as resp:
                     if resp.status != 200:
                         raise RuntimeError(f"HTTP {resp.status}")
                     data = await resp.json()
-                with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
+                # 确保目录存在
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+                # 在线程池中执行文件写入
+                await self.loop.run_in_executor(None, self._write_cache_file, data)
                 logger.info("anitabi.json 更新成功。")
             except Exception as e:
                 logger.error(f"下载 anitabi.json 失败: {e}")
-                if not os.path.exists(CACHE_FILE):
+                if not self.cache_file.exists():
                     raise RuntimeError("无法获取初始数据，请检查网络或 API 状态。")
 
-    def load_bangumi_list(self):
-        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+    def _write_cache_file(self, data):
+        with open(self.cache_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
-    @command("圣地巡礼")
+    async def load_bangumi_list(self):
+        def _load():
+            with open(self.cache_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return await self.loop.run_in_executor(None, _load)
+
+    @filter.command("圣地巡礼")
     async def sj_command(self, event: AstrMessageEvent, arg: str = ""):
         if not arg:
             help_text = (
@@ -100,7 +102,7 @@ class SacredJourneyPlugin(Star):
 
     async def random_work(self, event: AstrMessageEvent):
         try:
-            bangumi_list = self.load_bangumi_list()
+            bangumi_list = await self.load_bangumi_list()
             item = random.choice(bangumi_list)
             async for msg in self._send_work_detail(event, item):
                 yield msg
@@ -109,14 +111,14 @@ class SacredJourneyPlugin(Star):
             yield event.plain_result("获取随机作品失败，请稍后再试。")
 
     async def random_point(self, event: AstrMessageEvent):
-        bangumi_list = self.load_bangumi_list()
+        bangumi_list = await self.load_bangumi_list()
         for _ in range(10):
             item = random.choice(bangumi_list)
             sid = item.get('id')
             if not sid:
                 continue
             try:
-                async with self.session.get(LITE_API.format(sid), timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with self.session.get(LITE_API.format(sid), timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         points = data.get('litePoints', [])
@@ -157,14 +159,14 @@ class SacredJourneyPlugin(Star):
 
     async def guess_location(self, event: AstrMessageEvent):
         """猜地点游戏：显示图片，让用户从三个选项中猜出正确答案"""
-        bangumi_list = self.load_bangumi_list()
+        bangumi_list = await self.load_bangumi_list()
         for _ in range(10):
             item = random.choice(bangumi_list)
             sid = item.get('id')
             if not sid:
                 continue
             try:
-                async with self.session.get(LITE_API.format(sid), timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with self.session.get(LITE_API.format(sid), timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         points = data.get('litePoints', [])
@@ -184,7 +186,7 @@ class SacredJourneyPlugin(Star):
                                     break
                                 try:
                                     other_sid = other_item.get('id')
-                                    async with self.session.get(LITE_API.format(other_sid), timeout=aiohttp.ClientTimeout(total=5)) as other_resp:
+                                    async with self.session.get(LITE_API.format(other_sid), timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as other_resp:
                                         if other_resp.status == 200:
                                             other_data = await other_resp.json()
                                             other_points = other_data.get('litePoints', [])
@@ -192,7 +194,7 @@ class SacredJourneyPlugin(Star):
                                                 other_point = random.choice(other_points)
                                                 other_name = f"{other_point.get('cn', '')}（{other_point.get('name', '')}）"
                                                 distractors.append((other_name, other_item))
-                                except:
+                                except Exception:
                                     continue
 
                             if len(distractors) < 2:
@@ -320,91 +322,3 @@ class SacredJourneyPlugin(Star):
             yield event.plain_result("输入处理出错，请重试。")
             if user_id in self.waiting_for_input:
                 del self.waiting_for_input[user_id]
-
-    # ========== 图片生成部分 ==========
-    async def _fetch_image(self, url):
-        try:
-            if not url.startswith('http'):
-                return None
-            async with self.session.get(url) as resp:
-                if resp.status != 200:
-                    return None
-                img = Image.open(io.BytesIO(await resp.read())).convert("RGB")
-                return img.resize((280, 160))
-        except Exception as e:
-            logger.debug(f"图片加载失败: {url}, error: {e}")
-            return None
-
-    async def _generate_cover_grid(self, items):
-        tasks, labels = [], []
-        for i, item in enumerate(items):
-            cover = item.get('cover', '')
-            if cover.startswith('/'):
-                cover = 'https://api.anitabi.cn' + cover
-            elif not cover.startswith('http'):
-                cover = 'https://lain.bgm.tv/pic/cover/l/9b/e7/59392_05W7s.jpg'
-            tasks.append(self._fetch_image(cover))
-            cn = item.get('cn') or item.get('title', '未知')
-            labels.append(f"{i + 1}. {cn[:15]} ({item['id']})")
-        
-        # 正确处理异步任务结果
-        fetched_images = await asyncio.gather(*tasks)
-        imgs = []
-        valid_labels = []
-        for img, label in zip(fetched_images, labels):
-            if img is not None:
-                imgs.append(img)
-                valid_labels.append(label)
-        return self._build_grid_image(imgs, valid_labels)
-
-    async def _generate_image_grid(self, points):
-        tasks, labels = [], []
-        for i, p in enumerate(points):
-            img_url = p.get('image', '')
-            if not img_url.startswith('http'):
-                img_url = 'https://image.anitabi.cn/points/115908/qys7fu.jpg?plan=h160'
-            tasks.append(self._fetch_image(img_url))
-            cn = p.get('cn', '')
-            name = p.get('name', '')
-            labels.append(f"{i + 1}. {cn or name} ({p['id']})")
-        
-        # 正确处理异步任务结果
-        fetched_images = await asyncio.gather(*tasks)
-        imgs = []
-        valid_labels = []
-        for img, label in zip(fetched_images, labels):
-            if img is not None:
-                imgs.append(img)
-                valid_labels.append(label)
-        return self._build_grid_image(imgs, valid_labels)
-
-    def _build_grid_image(self, imgs, labels):
-        if not imgs:
-            img = Image.new('RGB', (1500, 160), (200, 200, 200))
-            draw = ImageDraw.Draw(img)
-            draw.text((10, 70), "无有效图片", fill=(0, 0, 0), font=self.font)
-            buf = io.BytesIO()
-            img.save(buf, format='PNG')
-            return buf.getvalue()
-        cols, rows = 5, (len(imgs) + 4) // 5
-        canvas = Image.new('RGB', (1500, rows * 190), (255, 255, 255))
-        for i, (img, label) in enumerate(zip(imgs, labels)):
-            x, y = (i % cols) * 300, (i // cols) * 190
-            canvas.paste(img, (x, y))
-            draw = ImageDraw.Draw(canvas)
-            draw.text((x + 5, y + 165), label, fill=(0, 0, 0), font=self.font)
-        buf = io.BytesIO()
-        canvas.save(buf, format='PNG')
-        return buf.getvalue()
-
-    async def _send_work_detail(self, event: AstrMessageEvent, item):
-        cover = item.get('cover', '')
-        if cover.startswith('/'):
-            cover = 'https://api.anitabi.cn' + cover
-        elif not cover.startswith('http'):
-            cover = 'https://lain.bgm.tv/pic/cover/l/9b/e7/59392_05W7s.jpg'
-        title = item.get('cn') or item.get('title', '未知')
-        yield event.image_result(cover)
-        yield event.plain_result(f"ID：{item['id']}\n标题：{title}")
-
-
