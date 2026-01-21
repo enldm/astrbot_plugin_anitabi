@@ -19,7 +19,6 @@ git clone https://github.com/enldm/astrbot_plugin_anitabi.git
 ```
 
 2. 确保 AstrBot 已安装以下依赖：
-
 ```
 aiohttp
 Pillow

@@ -1,13 +1,13 @@
-name: astrbot_plugin_anitabi # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
-display_name: 圣地巡礼查询 # 用于展示的名字，可以是方便人类阅读的名字（需要版本 >= v4.5.0，低版本不会报错，请放心填写）
-desc: 基于 Anitabi API 的动漫圣地巡礼查询插件，支持随机作品、随机地点和猜地点游戏功能。 # 插件简短描述
-version: v1.0.0 # 插件版本号。格式：v1.1.1 或者 v1.1
-author: enldm # 作者
-repo: https://github.com/enldm/astrbot_plugin_anitabi # 插件的仓库地址
-requirements: # 插件依赖
+name: astrbot_plugin_anitabi  # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
+display_name: 圣地巡礼查询  # 用于展示的名字，可以是方便人类阅读的名字（需要版本 >= v4.5.0，低版本不会报错，请放心填写）
+desc: 基于 Anitabi API 的圣地巡礼作品和地点查询插件，支持随机作品、随机地点和猜地点游戏  # 插件简短描述
+version: v1.0.0  # 插件版本号。格式：v1.1.1 或者 v1.1
+author: enldm  # 作者
+repo: https://github.com/enldm/astrbot_plugin_anitabi  # 插件的仓库地址
+requirements:  # 插件依赖
   - aiohttp
   - Pillow
-tags: # 插件标签
+tags:  # 插件标签
   - 娱乐
   - 动漫
   - 查询
