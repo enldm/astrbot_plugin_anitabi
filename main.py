@@ -19,7 +19,7 @@ REQUEST_TIMEOUT = 10
 CACHE_FETCH_TIMEOUT = 120  # 首次下载缓存文件的超时时间（秒）
 
 
-@register("圣地巡礼", "enldm", "圣地巡礼查询插件", "1.0.0")
+@register("圣地巡礼", "enldm", "圣地巡礼查询插件", "1.0.1")
 class SacredJourneyPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
