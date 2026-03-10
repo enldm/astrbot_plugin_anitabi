@@ -104,8 +104,11 @@ class SacredJourneyPlugin(Star):
         try:
             bangumi_list = await self.load_bangumi_list()
             item = random.choice(bangumi_list)
-            async for msg in self._send_work_detail(event, item):
-                yield msg
+            sid = item.get('id')
+            title = item.get('cn') or item.get('title', '未知')
+            work_link = f"https://www.anitabi.cn/map?bangumiId={sid}"
+            work_info = f"作品名称：{title}\n作品ID: {sid}\n作品直链: {work_link}"
+            yield event.plain_result(work_info)
         except Exception as e:
             logger.error(f"随机作品出错: {e}")
             yield event.plain_result("获取随机作品失败，请稍后再试。")
